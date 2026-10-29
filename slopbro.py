@@ -315,16 +315,16 @@ class SSAPClient:
     def _send(self, message):
         self._ws.send_text(json.dumps(message))
 
-    def register(self, client_key, manifest, timeout=PAIR_TIMEOUT):
+    def register(self, client_key, manifest, timeout=PAIR_TIMEOUT, pairing_type="PROMPT"):
         """Perform the SSAP register handshake.
 
         Returns the client-key string from the 'registered' reply. If no key was
-        stored, the TV shows a pairing prompt and this blocks (up to timeout)
-        until the user accepts.
+        stored, the TV shows a pairing prompt (PROMPT mode) or PIN code (PIN mode)
+        and this blocks (up to timeout) until the user accepts/enters it.
         """
         payload = {
             "forcePairing": False,
-            "pairingType": "PROMPT",
+            "pairingType": pairing_type,
             "manifest": manifest,
         }
         if client_key:
@@ -351,7 +351,24 @@ class SSAPClient:
             if mtype == "response" and (msg.get("payload") or {}).get("pairingType"):
                 if not prompted:
                     prompted = True
-                    log("accept the pairing prompt on the TV screen ...")
+                    if pairing_type == "PIN":
+                        log("TV is showing a PIN code on screen.")
+                        sys.stderr.write("Enter the PIN shown on your TV and press Enter: ")
+                        sys.stderr.flush()
+                        pin = sys.stdin.readline().strip()
+                        if not pin:
+                            raise SSAPError("no PIN entered")
+                        pin_payload = {
+                            "forcePairing": False,
+                            "pairingType": "PIN",
+                            "manifest": manifest,
+                            "pin": pin,
+                        }
+                        if client_key:
+                            pin_payload["client-key"] = client_key
+                        self._send({"id": self._next_id("register"), "type": "register", "payload": pin_payload})
+                    else:
+                        log("accept the pairing prompt on the TV screen ...")
                 continue
             if mtype == "error":
                 raise SSAPError(msg.get("error") or "registration rejected")
@@ -1012,6 +1029,7 @@ def run(
     webos_version_override=None,
     curl_insecure=False,
     fake_service_path=DEFAULT_FAKE_SERVICE_PATH,
+    pin_pairing=False,
 ):
     secure = True
     port = PORT_TLS if secure else PORT_PLAIN
@@ -1087,7 +1105,7 @@ def run(
             log("no stored client key; pairing will be requested")
 
         try:
-            new_key = client.register(stored_key, DEFAULT_MANIFEST)
+            new_key = client.register(stored_key, DEFAULT_MANIFEST, pairing_type="PIN" if pin_pairing else "PROMPT")
         except SSAPError as exc:
             die("registration failed: %s" % exc)
 
@@ -1185,6 +1203,10 @@ def main(argv=None):
         help="limit target apps by webOS version (e.g. 6.5); not auto-detected",
     )
     parser.add_argument(
+        "--pin-pairing", action="store_true",
+        help="use PIN pairing (TV shows a code on screen) instead of PROMPT dialog",
+    )
+    parser.add_argument(
         "--test-server", choices=TEST_SERVER_MODES,
         help="serve a connectivity response (simple) or payload without pairing",
     )
@@ -1223,6 +1245,7 @@ def main(argv=None):
             webos_version_override=args.webos_version,
             curl_insecure=args.curl_insecure,
             fake_service_path=args.fake_service_path,
+            pin_pairing=args.pin_pairing,
         )
     return 0
 
